@@ -1,6 +1,7 @@
 import os
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from database import Base, engine, SessionLocal
@@ -23,15 +24,24 @@ from utils.whatsapp import generate_whatsapp_link
 app = FastAPI(title="Travel Nest Cabs Backend")
 
 # -------------------
-# Static Invoices Path (ABSOLUTE PATH)
+# CORS
+# -------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # restrict later
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -------------------
+# Static Invoices Path
 # -------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INVOICE_DIR = os.path.join(BASE_DIR, "invoices")
 
-app.mount(
-    "/invoices",
-    StaticFiles(directory=os.path.join(BASE_DIR, "invoices")),
-    name="invoices"
-)
+os.makedirs(INVOICE_DIR, exist_ok=True)
+
+app.mount("/invoices", StaticFiles(directory=INVOICE_DIR), name="invoices")
 
 # -------------------
 # DB Init
@@ -70,8 +80,7 @@ def create_booking(data: BookingCreate, db: Session = Depends(get_db)):
 # -------------------
 @app.post("/api/admin/create")
 def create_admin(data: AdminCreate, db: Session = Depends(get_db)):
-    existing = db.query(Admin).filter(Admin.username == data.username).first()
-    if existing:
+    if db.query(Admin).filter(Admin.username == data.username).first():
         raise HTTPException(status_code=400, detail="Admin already exists")
 
     admin = Admin(
@@ -80,7 +89,6 @@ def create_admin(data: AdminCreate, db: Session = Depends(get_db)):
     )
     db.add(admin)
     db.commit()
-
     return {"message": "Admin created successfully"}
 
 @app.post("/api/admin/login")
@@ -88,16 +96,19 @@ def admin_login(data: AdminLogin, db: Session = Depends(get_db)):
     admin = db.query(Admin).filter(Admin.username == data.username).first()
     if not admin or not verify_password(data.password, admin.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
     return {"message": "Login successful"}
 
 # -------------------
-# Admin Booking Management
+# View Bookings
 # -------------------
 @app.get("/api/admin/bookings")
 def view_bookings(db: Session = Depends(get_db)):
     return db.query(Booking).all()
 
+# -------------------
+# UPDATE BOOKING STATUS
+# AUTO INVOICE + WHATSAPP
+# -------------------
 @app.put("/api/admin/bookings/{booking_id}")
 def update_booking_status(
     booking_id: int,
@@ -111,47 +122,95 @@ def update_booking_status(
     booking.status = data.status
     db.commit()
 
-    return {"message": "Booking status updated"}
+    invoice_created = False
+    invoice_url = None
+    whatsapp_link = None
+
+    # 🔥 AUTO-INVOICE WHEN COMPLETED
+    if data.status.lower() == "completed":
+        existing_invoice = db.query(Invoice).filter(
+            Invoice.booking_id == booking_id
+        ).first()
+
+        if not existing_invoice:
+            base_amount = booking.price
+            gst_amount = round(base_amount * 0.05, 2)
+            total_amount = base_amount + gst_amount
+
+            invoice_no = f"TNC-INV-{booking.id}"
+
+            invoice_data = {
+                "invoice_no": invoice_no,
+                "customer_name": booking.name,
+                "pickup": booking.pickup,
+                "drop": booking.drop,
+                "car": booking.car,
+                "travel_date": booking.travel_date,
+                "base_amount": base_amount,
+                "gst_amount": gst_amount,
+                "total_amount": total_amount,
+            }
+
+            pdf_path = generate_invoice(invoice_data)
+
+            invoice = Invoice(
+                booking_id=booking.id,
+                invoice_no=invoice_no,
+                base_amount=base_amount,
+                gst_amount=gst_amount,
+                total_amount=total_amount,
+                pdf_path=pdf_path,
+                status="Generated"
+            )
+
+            db.add(invoice)
+
+            booking.status = "INVOICED"
+            db.commit()
+
+            invoice_created = True
+            invoice_url = f"/{pdf_path}"
+
+            # ✅ WhatsApp Link
+            invoice_full_url = f"https://travelnest-backend-p13p.onrender.com/{pdf_path}"
+            whatsapp_link = generate_whatsapp_link(
+                booking.phone,
+                invoice_full_url
+            )
+
+    return {
+        "message": "Booking status updated",
+        "invoice_created": invoice_created,
+        "invoice_url": invoice_url,
+        "whatsapp_link": whatsapp_link
+    }
 
 # -------------------
-# GST Invoice Generation API
+# MANUAL INVOICE (BACKUP)
 # -------------------
 @app.post("/api/invoice/generate/{booking_id}")
-def generate_gst_invoice(
-    booking_id: int,
-    db: Session = Depends(get_db)
-):
+def generate_gst_invoice(booking_id: int, db: Session = Depends(get_db)):
     booking = db.query(Booking).filter(Booking.id == booking_id).first()
-
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    if booking.status.lower() not in ["completed", "invoiced"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Invoice can be generated only after ride completion"
-        )
-
-    # Prevent duplicate invoice
     existing_invoice = db.query(Invoice).filter(
         Invoice.booking_id == booking_id
     ).first()
 
     if existing_invoice:
-        invoice_full_url = f"http://127.0.0.1:8000/{existing_invoice.pdf_path}"
-        whatsapp_link = generate_whatsapp_link(
-            booking.phone,
-            invoice_full_url
-        )
-
         return {
             "message": "Invoice already generated",
             "invoice_url": f"/{existing_invoice.pdf_path}",
-            "invoice_status": existing_invoice.status,
-            "whatsapp_link": whatsapp_link
+            "invoice_status": existing_invoice.status
         }
 
-    # GST calculation (5%)
+    if booking.status.lower() != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail="Invoice can be generated only after ride completion"
+        )
+
     base_amount = booking.price
     gst_amount = round(base_amount * 0.05, 2)
     total_amount = base_amount + gst_amount
@@ -170,10 +229,8 @@ def generate_gst_invoice(
         "total_amount": total_amount,
     }
 
-    # Generate PDF
     pdf_path = generate_invoice(invoice_data)
 
-    # Save invoice
     invoice = Invoice(
         booking_id=booking.id,
         invoice_no=invoice_no,
@@ -185,28 +242,17 @@ def generate_gst_invoice(
     )
 
     db.add(invoice)
-
-    # Update booking status
     booking.status = "INVOICED"
-
     db.commit()
-
-    # WhatsApp link
-    invoice_full_url = f"https://travelnest-backend-p13p.onrender.com/{pdf_path}"
-    whatsapp_link = generate_whatsapp_link(
-        booking.phone,
-        invoice_full_url
-    )
 
     return {
         "message": "GST Invoice generated successfully",
         "invoice_url": f"/{pdf_path}",
-        "invoice_status": "Generated",
-        "whatsapp_link": whatsapp_link
+        "invoice_status": "Generated"
     }
 
 # -------------------
-# Invoice Status Update API
+# UPDATE INVOICE STATUS
 # -------------------
 @app.put("/api/admin/invoices/{invoice_id}/status")
 def update_invoice_status(
@@ -215,7 +261,6 @@ def update_invoice_status(
     db: Session = Depends(get_db)
 ):
     invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
-
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
@@ -229,14 +274,7 @@ def update_invoice_status(
     db.commit()
 
     return {
-        "message": "Invoice status updated successfully",
+        "message": "Invoice status updated",
         "invoice_id": invoice_id,
         "status": data.status
     }
-
-# -------------------
-# Run Server (Local)
-# -------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
