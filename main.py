@@ -28,7 +28,7 @@ app = FastAPI(title="Travel Nest Cabs Backend")
 # -------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # restrict later
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -38,7 +38,6 @@ app.add_middleware(
 # -------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INVOICE_DIR = os.path.join(BASE_DIR, "invoices")
-
 os.makedirs(INVOICE_DIR, exist_ok=True)
 
 app.mount("/invoices", StaticFiles(directory=INVOICE_DIR), name="invoices")
@@ -107,7 +106,7 @@ def view_bookings(db: Session = Depends(get_db)):
 
 # -------------------
 # UPDATE BOOKING STATUS
-# AUTO INVOICE + WHATSAPP
+# AUTO-INVOICE + WHATSAPP
 # -------------------
 @app.put("/api/admin/bookings/{booking_id}")
 def update_booking_status(
@@ -126,7 +125,6 @@ def update_booking_status(
     invoice_url = None
     whatsapp_link = None
 
-    # 🔥 AUTO-INVOICE WHEN COMPLETED
     if data.status.lower() == "completed":
         existing_invoice = db.query(Invoice).filter(
             Invoice.booking_id == booking_id
@@ -164,15 +162,13 @@ def update_booking_status(
             )
 
             db.add(invoice)
-
             booking.status = "INVOICED"
             db.commit()
 
             invoice_created = True
             invoice_url = f"/{pdf_path}"
 
-            # ✅ WhatsApp Link
-            invoice_full_url = f"https://travelnest-backend-p13p.onrender.com/{pdf_path}"
+            invoice_full_url = f"https://travelnest-backend-p13p.onrender.com{invoice_url}"
             whatsapp_link = generate_whatsapp_link(
                 booking.phone,
                 invoice_full_url
