@@ -192,7 +192,7 @@ def generate_gst_invoice(
     db.commit()
 
     # WhatsApp link
-    invoice_full_url = f"http://127.0.0.1:8000/{pdf_path}"
+    invoice_full_url = f"https://travelnest-backend-p13p.onrender.com/{pdf_path}"
     whatsapp_link = generate_whatsapp_link(
         booking.phone,
         invoice_full_url
