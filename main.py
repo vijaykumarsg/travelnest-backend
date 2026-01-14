@@ -17,6 +17,13 @@ from auth import hash_password, verify_password
 from generate_invoice import generate_invoice
 from utils.whatsapp import generate_whatsapp_link
 
+def get_base_url():
+    # Render / Production
+    if os.getenv("BASE_URL"):
+        return os.getenv("BASE_URL")
+
+    # Local fallback
+    return "http://127.0.0.1:8000"
 
 # -------------------
 # App Init
@@ -24,17 +31,18 @@ from utils.whatsapp import generate_whatsapp_link
 app = FastAPI(title="Travel Nest Cabs Backend")
 
 # -------------------
-# CORS
+# CORS (DEV SAFE)
 # -------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # tighten in production
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -------------------
-# Static Invoices Path
+# Static Invoices
 # -------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INVOICE_DIR = os.path.join(BASE_DIR, "invoices")
@@ -47,15 +55,14 @@ app.mount("/invoices", StaticFiles(directory=INVOICE_DIR), name="invoices")
 # -------------------
 Base.metadata.create_all(bind=engine)
 
-# -------------------
-# DB Dependency
-# -------------------
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
 
 # -------------------
 # Home
@@ -64,8 +71,9 @@ def get_db():
 def home():
     return {"status": "Running"}
 
+
 # -------------------
-# Booking APIs
+# Booking API
 # -------------------
 @app.post("/api/bookings")
 def create_booking(data: BookingCreate, db: Session = Depends(get_db)):
@@ -73,6 +81,7 @@ def create_booking(data: BookingCreate, db: Session = Depends(get_db)):
     db.add(booking)
     db.commit()
     return {"message": "Booking created successfully"}
+
 
 # -------------------
 # Admin APIs
@@ -90,6 +99,7 @@ def create_admin(data: AdminCreate, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Admin created successfully"}
 
+
 @app.post("/api/admin/login")
 def admin_login(data: AdminLogin, db: Session = Depends(get_db)):
     admin = db.query(Admin).filter(Admin.username == data.username).first()
@@ -97,16 +107,38 @@ def admin_login(data: AdminLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"message": "Login successful"}
 
+
 # -------------------
 # View Bookings
 # -------------------
 @app.get("/api/admin/bookings")
 def view_bookings(db: Session = Depends(get_db)):
-    return db.query(Booking).all()
+    bookings = db.query(Booking).all()
+    result = []
+
+    for b in bookings:
+        invoice = db.query(Invoice).filter(
+            Invoice.booking_id == b.id
+        ).first()
+
+        result.append({
+            "id": b.id,
+            "name": b.name,
+            "phone": b.phone,
+            "pickup": b.pickup,
+            "drop": b.drop,
+            "car": b.car,
+            "price": b.price,
+            "status": b.status,
+            "invoice_exists": True if invoice else False
+        })
+
+    return result
+
 
 # -------------------
 # UPDATE BOOKING STATUS
-# AUTO-INVOICE + WHATSAPP
+# AUTO INVOICE + WHATSAPP
 # -------------------
 @app.put("/api/admin/bookings/{booking_id}")
 def update_booking_status(
@@ -118,68 +150,69 @@ def update_booking_status(
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    booking.status = data.status
+    # ✅ NORMALIZE STATUS
+    new_status = data.status.strip().upper()
+    booking.status = new_status
     db.commit()
 
-    invoice_created = False
-    invoice_url = None
     whatsapp_link = None
 
-    if data.status.lower() == "completed":
+    # ✅ AUTO INVOICE WHEN COMPLETED
+    if new_status == "COMPLETED":
         existing_invoice = db.query(Invoice).filter(
             Invoice.booking_id == booking_id
         ).first()
 
         if not existing_invoice:
-            base_amount = booking.price
-            gst_amount = round(base_amount * 0.05, 2)
-            total_amount = base_amount + gst_amount
+            base = booking.price
+            gst = round(base * 0.05, 2)
+            total = base + gst
 
             invoice_no = f"TNC-INV-{booking.id}"
 
-            invoice_data = {
+            pdf_path = generate_invoice({
                 "invoice_no": invoice_no,
                 "customer_name": booking.name,
                 "pickup": booking.pickup,
                 "drop": booking.drop,
                 "car": booking.car,
                 "travel_date": booking.travel_date,
-                "base_amount": base_amount,
-                "gst_amount": gst_amount,
-                "total_amount": total_amount,
-            }
-
-            pdf_path = generate_invoice(invoice_data)
+                "base_amount": base,
+                "gst_amount": gst,
+                "total_amount": total,
+            })
 
             invoice = Invoice(
                 booking_id=booking.id,
                 invoice_no=invoice_no,
-                base_amount=base_amount,
-                gst_amount=gst_amount,
-                total_amount=total_amount,
+                base_amount=base,
+                gst_amount=gst,
+                total_amount=total,
                 pdf_path=pdf_path,
                 status="Generated"
             )
 
             db.add(invoice)
+
+            # SYSTEM STATE
             booking.status = "INVOICED"
             db.commit()
 
-            invoice_created = True
-            invoice_url = f"/{pdf_path}"
+            # ✅ LOCAL / PROD SAFE URL
+            base_url = get_base_url()
+            invoice_url = f"{base_url}/{pdf_path}"
 
-            invoice_full_url = f"https://travelnest-backend-p13p.onrender.com{invoice_url}"
+
             whatsapp_link = generate_whatsapp_link(
                 booking.phone,
-                invoice_full_url
+                invoice_url
             )
 
     return {
         "message": "Booking status updated",
-        "invoice_created": invoice_created,
-        "invoice_url": invoice_url,
         "whatsapp_link": whatsapp_link
     }
+
 
 # -------------------
 # MANUAL INVOICE (BACKUP)
@@ -201,38 +234,36 @@ def generate_gst_invoice(booking_id: int, db: Session = Depends(get_db)):
             "invoice_status": existing_invoice.status
         }
 
-    if booking.status.lower() != "completed":
+    if booking.status.upper() != "COMPLETED":
         raise HTTPException(
             status_code=400,
             detail="Invoice can be generated only after ride completion"
         )
 
-    base_amount = booking.price
-    gst_amount = round(base_amount * 0.05, 2)
-    total_amount = base_amount + gst_amount
+    base = booking.price
+    gst = round(base * 0.05, 2)
+    total = base + gst
 
     invoice_no = f"TNC-INV-{booking.id}"
 
-    invoice_data = {
+    pdf_path = generate_invoice({
         "invoice_no": invoice_no,
         "customer_name": booking.name,
         "pickup": booking.pickup,
         "drop": booking.drop,
         "car": booking.car,
         "travel_date": booking.travel_date,
-        "base_amount": base_amount,
-        "gst_amount": gst_amount,
-        "total_amount": total_amount,
-    }
-
-    pdf_path = generate_invoice(invoice_data)
+        "base_amount": base,
+        "gst_amount": gst,
+        "total_amount": total,
+    })
 
     invoice = Invoice(
         booking_id=booking.id,
         invoice_no=invoice_no,
-        base_amount=base_amount,
-        gst_amount=gst_amount,
-        total_amount=total_amount,
+        base_amount=base,
+        gst_amount=gst,
+        total_amount=total,
         pdf_path=pdf_path,
         status="Generated"
     )
@@ -246,6 +277,7 @@ def generate_gst_invoice(booking_id: int, db: Session = Depends(get_db)):
         "invoice_url": f"/{pdf_path}",
         "invoice_status": "Generated"
     }
+
 
 # -------------------
 # UPDATE INVOICE STATUS
@@ -273,4 +305,41 @@ def update_invoice_status(
         "message": "Invoice status updated",
         "invoice_id": invoice_id,
         "status": data.status
+    }
+
+
+# -------------------
+# RESEND WHATSAPP
+# -------------------
+@app.post("/api/invoice/resend-whatsapp/{booking_id}")
+def resend_invoice_whatsapp(
+    booking_id: int,
+    db: Session = Depends(get_db)
+):
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    invoice = db.query(Invoice).filter(
+        Invoice.booking_id == booking_id
+    ).first()
+
+    if not invoice:
+        raise HTTPException(
+            status_code=400,
+            detail="Invoice not generated yet"
+        )
+
+    base_url = get_base_url()
+    invoice_url = f"{base_url}/{invoice.pdf_path}"
+
+
+    whatsapp_link = generate_whatsapp_link(
+        booking.phone,
+        invoice_url
+    )
+
+    return {
+        "message": "WhatsApp invoice link generated",
+        "whatsapp_link": whatsapp_link
     }

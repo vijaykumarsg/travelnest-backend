@@ -1,17 +1,13 @@
-import urllib.parse
+from urllib.parse import quote
 
-def generate_whatsapp_link(phone: str, invoice_url: str):
-    """
-    Generates WhatsApp click-to-chat link
-    """
-    message = (
-        "Hello 👋\n"
-        "Your GST Invoice is ready.\n\n"
-        f"Download here: {invoice_url}"
-    )
+def generate_whatsapp_link(phone, invoice_url):
+    message = f"""
+🧾 *Travel Nest Cabs – GST Invoice*
 
-    encoded_message = urllib.parse.quote(message)
+Your invoice is ready.
 
-    phone = phone.replace("+", "").replace(" ", "")
+{invoice_url}
 
-    return f"https://wa.me/{phone}?text={encoded_message}"
+Thank you for choosing Travel Nest Cabs 🚖
+"""
+    return f"https://wa.me/{phone}?text={quote(message)}"
