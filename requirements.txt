@@ -1,10 +1,9 @@
 fastapi
 uvicorn
 sqlalchemy
-pydantic
+python-jose[cryptography]
+passlib[argon2]
 argon2-cffi
-python-multipart
-psycopg2-binary
 reportlab
-python-dotenv
-
+pydantic
+python-multipart
