@@ -1,10 +1,16 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime
+from datetime import datetime
 from database import Base
+
 
 class Booking(Base):
     __tablename__ = "bookings"
 
     id = Column(Integer, primary_key=True, index=True)
+
+    # ✅ NEW
+    booking_number = Column(String, unique=True, index=True)
+
     name = Column(String)
     phone = Column(String)
     pickup = Column(String)
@@ -14,7 +20,11 @@ class Booking(Base):
     price = Column(Float)
     travel_date = Column(String)
     travel_time = Column(String)
-    status = Column(String, default="Pending")
+
+    status = Column(String, default="PENDING")
+
+    # ✅ NEW
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Admin(Base):
@@ -36,4 +46,4 @@ class Invoice(Base):
     total_amount = Column(Float)
     pdf_path = Column(String)
 
-    status = Column(String, default="NotGenerated")
+    status = Column(String, default="NOT_GENERATED")

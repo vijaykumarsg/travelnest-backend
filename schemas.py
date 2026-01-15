@@ -1,6 +1,10 @@
 from pydantic import BaseModel
 from typing import Literal
 
+
+# -------------------
+# BOOKING (FRONTEND)
+# -------------------
 class BookingCreate(BaseModel):
     name: str
     phone: str
@@ -13,6 +17,9 @@ class BookingCreate(BaseModel):
     travel_time: str
 
 
+# -------------------
+# ADMIN AUTH
+# -------------------
 class AdminCreate(BaseModel):
     username: str
     password: str
@@ -23,15 +30,26 @@ class AdminLogin(BaseModel):
     password: str
 
 
+# -------------------
+# BOOKING STATUS
+# -------------------
 class BookingStatusUpdate(BaseModel):
-    status: Literal["Pending", "Confirmed", "Completed", "Cancelled"]
+    status: Literal[
+        "PENDING",
+        "CONFIRMED",
+        "COMPLETED",
+        "CANCELLED"
+    ]
 
 
+# -------------------
+# INVOICE STATUS
+# -------------------
 class InvoiceStatusUpdate(BaseModel):
     status: Literal[
-        "NotGenerated",
-        "Generated",
-        "Sent",
-        "Paid",
-        "Cancelled"
+        "NOT_GENERATED",
+        "GENERATED",
+        "SENT",
+        "PAID",
+        "CANCELLED"
     ]

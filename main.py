@@ -1,8 +1,12 @@
 import os
-from fastapi import FastAPI, Depends, HTTPException
+from datetime import datetime, timedelta
+
+from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
+from jose import jwt, JWTError
 
 from database import Base, engine, SessionLocal
 from models import Booking, Admin, Invoice
@@ -17,42 +21,85 @@ from auth import hash_password, verify_password
 from generate_invoice import generate_invoice
 from utils.whatsapp import generate_whatsapp_link
 
+
+# ===============================
+# JWT CONFIG
+# ===============================
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "CHANGE_THIS_SECRET_IN_PRODUCTION")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+security = HTTPBearer()
+
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_admin(
+    credentials: HTTPAuthorizationCredentials = Security(security)
+):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+# ===============================
+# BASE URL
+# ===============================
 def get_base_url():
-    # Render / Production
-    if os.getenv("BASE_URL"):
-        return os.getenv("BASE_URL")
+    return os.getenv("BASE_URL", "http://127.0.0.1:8000")
 
-    # Local fallback
-    return "http://127.0.0.1:8000"
 
-# -------------------
-# App Init
-# -------------------
+# ===============================
+# BOOKING NUMBER GENERATOR
+# ===============================
+def generate_booking_number(db: Session):
+    today = datetime.utcnow().strftime("%Y%m%d")
+    count = db.query(Booking).filter(
+        Booking.booking_number.like(f"TNC-{today}-%")
+    ).count()
+
+    seq = str(count + 1).zfill(4)
+    return f"TNC-{today}-{seq}"
+
+
+# ===============================
+# APP INIT
+# ===============================
 app = FastAPI(title="Travel Nest Cabs Backend")
 
-# -------------------
-# CORS (DEV SAFE)
-# -------------------
+
+# ===============================
+# CORS
+# ===============================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=["*"],   # tighten in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------
-# Static Invoices
-# -------------------
+
+# ===============================
+# STATIC INVOICES
+# ===============================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INVOICE_DIR = os.path.join(BASE_DIR, "invoices")
 os.makedirs(INVOICE_DIR, exist_ok=True)
-
 app.mount("/invoices", StaticFiles(directory=INVOICE_DIR), name="invoices")
 
-# -------------------
-# DB Init
-# -------------------
+
+# ===============================
+# DB INIT
+# ===============================
 Base.metadata.create_all(bind=engine)
 
 
@@ -64,28 +111,40 @@ def get_db():
         db.close()
 
 
-# -------------------
-# Home
-# -------------------
+# ===============================
+# HEALTH CHECK
+# ===============================
 @app.get("/")
 def home():
-    return {"status": "Running"}
+    return {"status": "Backend running"}
 
 
-# -------------------
-# Booking API
-# -------------------
-@app.post("/api/bookings")
+# =====================================================
+# PUBLIC API — CUSTOMER BOOKING (NO JWT)
+# =====================================================
+@app.post("/api/bookings", status_code=201)
 def create_booking(data: BookingCreate, db: Session = Depends(get_db)):
-    booking = Booking(**data.dict())
+    booking_number = generate_booking_number(db)
+
+    booking = Booking(
+        booking_number=booking_number,
+        **data.dict()
+    )
+
     db.add(booking)
     db.commit()
-    return {"message": "Booking created successfully"}
+    db.refresh(booking)
+
+    return {
+        "message": "Booking created successfully",
+        "booking_id": booking.id,
+        "booking_number": booking.booking_number
+    }
 
 
-# -------------------
-# Admin APIs
-# -------------------
+# =====================================================
+# ADMIN AUTH
+# =====================================================
 @app.post("/api/admin/create")
 def create_admin(data: AdminCreate, db: Session = Depends(get_db)):
     if db.query(Admin).filter(Admin.username == data.username).first():
@@ -97,6 +156,7 @@ def create_admin(data: AdminCreate, db: Session = Depends(get_db)):
     )
     db.add(admin)
     db.commit()
+
     return {"message": "Admin created successfully"}
 
 
@@ -105,15 +165,25 @@ def admin_login(data: AdminLogin, db: Session = Depends(get_db)):
     admin = db.query(Admin).filter(Admin.username == data.username).first()
     if not admin or not verify_password(data.password, admin.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {"message": "Login successful"}
+
+    token = create_access_token({"sub": admin.username})
+
+    return {
+        "message": "Login successful",
+        "access_token": token,
+        "token_type": "bearer"
+    }
 
 
-# -------------------
-# View Bookings
-# -------------------
+# =====================================================
+# ADMIN APIs — JWT PROTECTED
+# =====================================================
 @app.get("/api/admin/bookings")
-def view_bookings(db: Session = Depends(get_db)):
-    bookings = db.query(Booking).all()
+def view_bookings(
+    db: Session = Depends(get_db),
+    admin=Depends(get_current_admin)
+):
+    bookings = db.query(Booking).order_by(Booking.created_at.desc()).all()
     result = []
 
     for b in bookings:
@@ -123,6 +193,7 @@ def view_bookings(db: Session = Depends(get_db)):
 
         result.append({
             "id": b.id,
+            "booking_number": b.booking_number,
             "name": b.name,
             "phone": b.phone,
             "pickup": b.pickup,
@@ -130,45 +201,39 @@ def view_bookings(db: Session = Depends(get_db)):
             "car": b.car,
             "price": b.price,
             "status": b.status,
-            "invoice_exists": True if invoice else False
+            "created_at": b.created_at,
+            "invoice_exists": bool(invoice)
         })
 
     return result
 
 
-# -------------------
-# UPDATE BOOKING STATUS
-# AUTO INVOICE + WHATSAPP
-# -------------------
 @app.put("/api/admin/bookings/{booking_id}")
 def update_booking_status(
     booking_id: int,
     data: BookingStatusUpdate,
     db: Session = Depends(get_db),
+    admin=Depends(get_current_admin)
 ):
     booking = db.query(Booking).filter(Booking.id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    # ✅ NORMALIZE STATUS
-    new_status = data.status.strip().upper()
-    booking.status = new_status
+    booking.status = data.status
     db.commit()
 
     whatsapp_link = None
 
-    # ✅ AUTO INVOICE WHEN COMPLETED
-    if new_status == "COMPLETED":
-        existing_invoice = db.query(Invoice).filter(
+    if data.status == "COMPLETED":
+        invoice = db.query(Invoice).filter(
             Invoice.booking_id == booking_id
         ).first()
 
-        if not existing_invoice:
+        if not invoice:
             base = booking.price
             gst = round(base * 0.05, 2)
             total = base + gst
-
-            invoice_no = f"TNC-INV-{booking.id}"
+            invoice_no = f"TNC-INV-{booking.booking_number}"
 
             pdf_path = generate_invoice({
                 "invoice_no": invoice_no,
@@ -189,20 +254,14 @@ def update_booking_status(
                 gst_amount=gst,
                 total_amount=total,
                 pdf_path=pdf_path,
-                status="Generated"
+                status="GENERATED"
             )
 
             db.add(invoice)
-
-            # SYSTEM STATE
             booking.status = "INVOICED"
             db.commit()
 
-            # ✅ LOCAL / PROD SAFE URL
-            base_url = get_base_url()
-            invoice_url = f"{base_url}/{pdf_path}"
-
-
+            invoice_url = f"{get_base_url()}/{pdf_path}"
             whatsapp_link = generate_whatsapp_link(
                 booking.phone,
                 invoice_url
@@ -214,107 +273,11 @@ def update_booking_status(
     }
 
 
-# -------------------
-# MANUAL INVOICE (BACKUP)
-# -------------------
-@app.post("/api/invoice/generate/{booking_id}")
-def generate_gst_invoice(booking_id: int, db: Session = Depends(get_db)):
-    booking = db.query(Booking).filter(Booking.id == booking_id).first()
-    if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
-
-    existing_invoice = db.query(Invoice).filter(
-        Invoice.booking_id == booking_id
-    ).first()
-
-    if existing_invoice:
-        return {
-            "message": "Invoice already generated",
-            "invoice_url": f"/{existing_invoice.pdf_path}",
-            "invoice_status": existing_invoice.status
-        }
-
-    if booking.status.upper() != "COMPLETED":
-        raise HTTPException(
-            status_code=400,
-            detail="Invoice can be generated only after ride completion"
-        )
-
-    base = booking.price
-    gst = round(base * 0.05, 2)
-    total = base + gst
-
-    invoice_no = f"TNC-INV-{booking.id}"
-
-    pdf_path = generate_invoice({
-        "invoice_no": invoice_no,
-        "customer_name": booking.name,
-        "pickup": booking.pickup,
-        "drop": booking.drop,
-        "car": booking.car,
-        "travel_date": booking.travel_date,
-        "base_amount": base,
-        "gst_amount": gst,
-        "total_amount": total,
-    })
-
-    invoice = Invoice(
-        booking_id=booking.id,
-        invoice_no=invoice_no,
-        base_amount=base,
-        gst_amount=gst,
-        total_amount=total,
-        pdf_path=pdf_path,
-        status="Generated"
-    )
-
-    db.add(invoice)
-    booking.status = "INVOICED"
-    db.commit()
-
-    return {
-        "message": "GST Invoice generated successfully",
-        "invoice_url": f"/{pdf_path}",
-        "invoice_status": "Generated"
-    }
-
-
-# -------------------
-# UPDATE INVOICE STATUS
-# -------------------
-@app.put("/api/admin/invoices/{invoice_id}/status")
-def update_invoice_status(
-    invoice_id: int,
-    data: InvoiceStatusUpdate,
-    db: Session = Depends(get_db)
-):
-    invoice = db.query(Invoice).filter(Invoice.id == invoice_id).first()
-    if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-
-    if invoice.status == "Paid":
-        raise HTTPException(
-            status_code=400,
-            detail="Paid invoice cannot be modified"
-        )
-
-    invoice.status = data.status
-    db.commit()
-
-    return {
-        "message": "Invoice status updated",
-        "invoice_id": invoice_id,
-        "status": data.status
-    }
-
-
-# -------------------
-# RESEND WHATSAPP
-# -------------------
 @app.post("/api/invoice/resend-whatsapp/{booking_id}")
 def resend_invoice_whatsapp(
     booking_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin=Depends(get_current_admin)
 ):
     booking = db.query(Booking).filter(Booking.id == booking_id).first()
     if not booking:
@@ -325,15 +288,9 @@ def resend_invoice_whatsapp(
     ).first()
 
     if not invoice:
-        raise HTTPException(
-            status_code=400,
-            detail="Invoice not generated yet"
-        )
+        raise HTTPException(status_code=400, detail="Invoice not generated")
 
-    base_url = get_base_url()
-    invoice_url = f"{base_url}/{invoice.pdf_path}"
-
-
+    invoice_url = f"{get_base_url()}/{invoice.pdf_path}"
     whatsapp_link = generate_whatsapp_link(
         booking.phone,
         invoice_url
