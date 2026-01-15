@@ -7,3 +7,4 @@ argon2-cffi
 reportlab
 pydantic
 python-multipart
+psycopg2-binary
