@@ -107,22 +107,38 @@ def home():
 # =====================================================
 @app.post("/api/bookings", status_code=201)
 def create_booking(data: BookingCreate, db: Session = Depends(get_db)):
-    booking_number = generate_booking_number(db)
+    try:
 
-    booking = Booking(
-        booking_number=booking_number,
-        **data.dict()
-    )
+        booking_number = generate_booking_number(db)
 
-    db.add(booking)
-    db.commit()
-    db.refresh(booking)
+        booking = Booking(
+            booking_number=booking_number,
+            name=data.name,
+            phone=data.phone,
+            pickup=data.pickup,
+            drop=data.drop,
+            trip_type=data.trip_type,
+            car=data.car,
+            price=float(data.price),
+            travel_date=str(data.travel_date),
+            travel_time=str(data.travel_time),
+            status="PENDING"
+        )
 
-    return {
-        "message": "Booking created successfully",
-        "booking_id": booking.id,
-        "booking_number": booking.booking_number
-    }
+        db.add(booking)
+        db.commit()
+        db.refresh(booking)
+
+        return {
+            "message": "Booking created successfully",
+            "booking_id": booking.id,
+            "booking_number": booking.booking_number
+        }
+
+    except Exception as e:
+        print("🔥 BOOKING ERROR:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # =====================================================
 # ADMIN CREATE (RUN ONCE)
