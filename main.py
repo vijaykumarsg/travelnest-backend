@@ -5,7 +5,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database import Base, engine, SessionLocal
@@ -53,6 +53,13 @@ app.mount("/invoices", StaticFiles(directory=INVOICE_DIR), name="invoices")
 # DB INIT
 # ===============================
 Base.metadata.create_all(bind=engine)
+
+# AUTO ADD MISSING COLUMNS FOR RENDER DB
+with engine.connect() as conn:
+    try:
+        conn.execute(text("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_number VARCHAR;"))
+    except Exception:
+        pass
 
 def get_db():
     db = SessionLocal()
