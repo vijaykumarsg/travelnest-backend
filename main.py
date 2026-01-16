@@ -54,12 +54,6 @@ app.mount("/invoices", StaticFiles(directory=INVOICE_DIR), name="invoices")
 # ===============================
 Base.metadata.create_all(bind=engine)
 
-# AUTO ADD MISSING COLUMNS FOR RENDER DB
-with engine.connect() as conn:
-    try:
-        conn.execute(text("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_number VARCHAR;"))
-    except Exception:
-        pass
 
 def get_db():
     db = SessionLocal()
@@ -94,13 +88,10 @@ def get_base_url():
 # BOOKING NUMBER GENERATOR
 # ===============================
 def generate_booking_number(db: Session):
+    from random import randint
     today = datetime.utcnow().strftime("%Y%m%d")
-    count = db.query(Booking).filter(
-        Booking.booking_number.like(f"TNC-{today}-%")
-    ).count()
+    return f"TNC-{today}-{randint(1000,9999)}"
 
-    seq = str(count + 1).zfill(4)
-    return f"TNC-{today}-{seq}"
 
 # ===============================
 # HEALTH CHECK
