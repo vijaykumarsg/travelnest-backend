@@ -1,61 +1,87 @@
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from fastapi import FastAPI, Depends, HTTPException, Security
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+
 from sqlalchemy.orm import Session
-from jose import jwt, JWTError
 
 from database import Base, engine, SessionLocal
 from models import Booking, Admin, Invoice
 from schemas import (
     BookingCreate,
     AdminCreate,
-    AdminLogin,
     BookingStatusUpdate,
-    InvoiceStatusUpdate,
 )
 from auth import hash_password, verify_password
 from generate_invoice import generate_invoice
 from utils.whatsapp import generate_whatsapp_link
 
+# ===============================
+# APP INIT
+# ===============================
+app = FastAPI(title="Travel Nest Cabs Backend")
 
 # ===============================
-# JWT CONFIG
+# CORS
 # ===============================
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "CHANGE_THIS_SECRET_IN_PRODUCTION")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://travelnestcabs.com",
+        "http://127.0.0.1:5500",
+        "http://localhost:5500",
+        "*"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"]
+)
 
-security = HTTPBearer()
+# ===============================
+# STATIC INVOICES
+# ===============================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INVOICE_DIR = os.path.join(BASE_DIR, "invoices")
+os.makedirs(INVOICE_DIR, exist_ok=True)
+app.mount("/invoices", StaticFiles(directory=INVOICE_DIR), name="invoices")
 
+# ===============================
+# DB INIT
+# ===============================
+Base.metadata.create_all(bind=engine)
 
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
+# ===============================
+# BASIC AUTH (ADMIN)
+# ===============================
+security = HTTPBasic()
 
 def get_current_admin(
-    credentials: HTTPAuthorizationCredentials = Security(security)
+    credentials: HTTPBasicCredentials = Depends(security),
+    db: Session = Depends(get_db)
 ):
-    token = credentials.credentials
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    admin = db.query(Admin).filter(Admin.username == credentials.username).first()
 
+    if not admin or not verify_password(credentials.password, admin.password):
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+
+    return admin
 
 # ===============================
 # BASE URL
 # ===============================
 def get_base_url():
     return os.getenv("BASE_URL", "http://127.0.0.1:8000")
-
 
 # ===============================
 # BOOKING NUMBER GENERATOR
@@ -69,48 +95,6 @@ def generate_booking_number(db: Session):
     seq = str(count + 1).zfill(4)
     return f"TNC-{today}-{seq}"
 
-
-# ===============================
-# APP INIT
-# ===============================
-app = FastAPI(title="Travel Nest Cabs Backend")
-
-
-# ===============================
-# CORS
-# ===============================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # tighten in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# ===============================
-# STATIC INVOICES
-# ===============================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INVOICE_DIR = os.path.join(BASE_DIR, "invoices")
-os.makedirs(INVOICE_DIR, exist_ok=True)
-app.mount("/invoices", StaticFiles(directory=INVOICE_DIR), name="invoices")
-
-
-# ===============================
-# DB INIT
-# ===============================
-Base.metadata.create_all(bind=engine)
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 # ===============================
 # HEALTH CHECK
 # ===============================
@@ -118,9 +102,8 @@ def get_db():
 def home():
     return {"status": "Backend running"}
 
-
 # =====================================================
-# PUBLIC API — CUSTOMER BOOKING (NO JWT)
+# PUBLIC API — CUSTOMER BOOKING
 # =====================================================
 @app.post("/api/bookings", status_code=201)
 def create_booking(data: BookingCreate, db: Session = Depends(get_db)):
@@ -141,9 +124,8 @@ def create_booking(data: BookingCreate, db: Session = Depends(get_db)):
         "booking_number": booking.booking_number
     }
 
-
 # =====================================================
-# ADMIN AUTH
+# ADMIN CREATE (RUN ONCE)
 # =====================================================
 @app.post("/api/admin/create")
 def create_admin(data: AdminCreate, db: Session = Depends(get_db)):
@@ -154,29 +136,14 @@ def create_admin(data: AdminCreate, db: Session = Depends(get_db)):
         username=data.username,
         password=hash_password(data.password),
     )
+
     db.add(admin)
     db.commit()
 
     return {"message": "Admin created successfully"}
 
-
-@app.post("/api/admin/login")
-def admin_login(data: AdminLogin, db: Session = Depends(get_db)):
-    admin = db.query(Admin).filter(Admin.username == data.username).first()
-    if not admin or not verify_password(data.password, admin.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    token = create_access_token({"sub": admin.username})
-
-    return {
-        "message": "Login successful",
-        "access_token": token,
-        "token_type": "bearer"
-    }
-
-
 # =====================================================
-# ADMIN APIs — JWT PROTECTED
+# ADMIN APIs — BASIC AUTH PROTECTED
 # =====================================================
 @app.get("/api/admin/bookings")
 def view_bookings(
@@ -206,7 +173,6 @@ def view_bookings(
         })
 
     return result
-
 
 @app.put("/api/admin/bookings/{booking_id}")
 def update_booking_status(
@@ -271,7 +237,6 @@ def update_booking_status(
         "message": "Booking status updated",
         "whatsapp_link": whatsapp_link
     }
-
 
 @app.post("/api/invoice/resend-whatsapp/{booking_id}")
 def resend_invoice_whatsapp(

@@ -13,8 +13,9 @@ class BookingCreate(BaseModel):
     trip_type: str
     car: str
     price: float
-    travel_date: str
-    travel_time: str
+    travel_date: str | None = None
+    travel_time: str | None = None
+
 
 
 # -------------------
